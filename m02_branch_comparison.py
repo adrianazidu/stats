@@ -5,8 +5,8 @@ from scipy import stats
 import data
 
 a,b = data.two_branches()
-print(f" a len {len(a)} mean {a.mean():.2f} median {a.median():.2f}")
-print(f" b len {len(a)} mean {b.mean():.2f} median {b.median():.2f}")
+print(f" a len {len(a)} mean {a.mean():.2f} median {np.median(a):.2f}")
+print(f" b len {len(a)} mean {b.mean():.2f} median {np.median(b):.2f}")
 
 """ t test (Welch) calculates a 2-sample independent t-test to check if two separate groups of data have significantly different means
  statistic - the t value 0 (the groups are identical) or large number (the means are far apart)
