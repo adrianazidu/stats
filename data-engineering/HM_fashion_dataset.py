@@ -47,12 +47,48 @@ def load_hm_data(articles_p="articles.csv", customers_p="customers.csv", tx_p="t
             LIMIT 50000
         """
         df = con.execute(query).df()
+    else:
+        print("H&M files not detected on disk. Using built-in synthetic H&M multi-modal sample.")
+        df = generate_mock_hm_data()
 
+    return df
+
+def generate_mock_hm_data():
+    """Generates synthetic replica matching H&M's transactions, customers, and articles."""
+    np.random.seed(42)
+    n = 2500
+
+    customers = [f"cust_{i:04d}" for i in range(200)]
+    articles = [f"art_{j:04d}" for j in range(50)]
+
+    descriptions = [
+        "Slim fit cotton jeans with regular waist.",
+        "Oversized printed hoodie in soft sweat fabric.",
+        "Leather shoulder bag with metallic buckle closure.",
+        "Ribbed knit sweater with high collar.",
+        "Regular fit casual t-shirt with crew neck."
+    ]
+
+    df = pd.DataFrame({
+        "customer_id": np.random.choice(customers, size=n),
+        "article_id": np.random.choice(articles, size=n),
+        "price": np.random.exponential(scale=0.03, size=n) + 0.005,
+
+        #generates an array of n random numbers drawn from a normal distribution, while randomly injecting NaN (missing) values roughly 15% of the time
+        #realistic missing data
+        "age": np.where(np.random.rand(n) > 0.15, np.random.normal(34, 11, size=n), np.nan),
+        "club_member_status": np.random.choice(["ACTIVE", "PRE-CREATE", "LEFT CLUB", np.nan], size=n),
+        "garment_group_name": np.random.choice(["Jersey Basic", "Knitwear", "Trousers", "Accessories"], size=n),
+        "detail_desc": np.random.choice(descriptions, size=n),
+        # Target: 1 = purchase in test week, 0 = non-purchase (~5% purchase rate)
+        "purchased": np.random.choice([0, 1], size=n, p=[0.95, 0.05])
+    })
     return df
 
 
 def build_hm_pipeline():
     # 1. Unstructured text pipeline: TF-IDF on product description strings
+    # converts raw text documents into a numerical matrix of up to 15 important words, while automatically ignoring common English filler words.
     text_pipeline = Pipeline([
         ("tfidf", TfidfVectorizer(max_features=15, stop_words="english"))
     ])
@@ -60,6 +96,9 @@ def build_hm_pipeline():
     # 2. Demographic discretization: Quantile-based age partitioning
     age_discretizer = Pipeline([
         ("impute", SimpleImputer(strategy="median")),
+
+        #takes continuous numerical columns and splits them into 4 equal-sized buckets (quartiles)
+        #Converts the bin assignments into 4 separate binary (0.0 or 1.0) columns per input feature 
         ("discretize", KBinsDiscretizer(n_bins=4, encode="onehot-dense", strategy="quantile"))
     ])
 
@@ -111,6 +150,8 @@ def build_hm_pipeline():
 
 if __name__ == "__main__":
     df = load_hm_data()
+
+    print(df.head())
     y = df["purchased"].to_numpy()
     X = df.drop(columns=["purchased", "customer_id", "article_id"], errors="ignore")
 
