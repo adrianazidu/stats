@@ -15,6 +15,7 @@ Demonstrates:
 import os
 import duckdb
 import pandas as pd
+import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.decomposition import PCA
@@ -22,9 +23,20 @@ from sklearn.feature_selection import SelectKBest,f_classif
 from sklearn.impute import MissingIndicator,SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import FeatureUnion,Pipeline
-from sklearn.preprocessing import Binarizer,OneHotEncoder,RobustScaler,SplineTransformer
+from sklearn.preprocessing import Binarizer,OneHotEncoder,RobustScaler,SplineTransformer,TargetEncoder
 from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
+
+from sklearn.metrics import (
+    average_precision_score,
+    brier_score_loss,
+    classification_report,
+    roc_auc_score,
+)
+from sklearn.model_selection import train_test_split
+import xgboost as xgb
+
+CLASSIFIER = os.getenv("CLASSIFIER","xgb")
 
 def load_data(tx_path="train_transaction.csv",id_path="train_identity.csv"):
 
@@ -115,7 +127,7 @@ def generate_mock_ieee_data():
     
     return transaction_df, identity_df
 
-def build_pipeline():
+def build_pipeline(scale_pos_weight):
 
     cont_cols = ["TransactionAmt", "V1"]
     dist_cols = ["dist1"]                     # Continuous with zero-inflation / missingness
@@ -128,11 +140,11 @@ def build_pipeline():
          #use it here to male SimpleImputer and Missingindicator work in parallel,
          #otherwise if simpleimputer fills a value with median, the indicator won't know that it was null before
          #missingindicator creates another column that says True/false if value is missing in the applied column
-        "union", FeatureUnion([  
-            "impute",SimpleImputer(strategy="median"),
-            "indicator",MissingIndicator(error_on_new=False)
-            ]),
-        "scaler",RobustScaler()
+        ("union", FeatureUnion([  
+            ("impute",SimpleImputer(strategy="median")),
+            ("indicator",MissingIndicator(error_on_new=False))
+            ])),
+        ("scaler",RobustScaler())
         ])
 
     #binarize pipeline
@@ -150,40 +162,78 @@ def build_pipeline():
     ])
 
     #categorical pipeline
-    cat_pipeline = Pipeline([
-        ("impute", SimpleImputer(strategy="most_frequent")),
-        ("ohe", OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore"))
-    ])
+    if CLASSIFIER == "LR":
+        cat_pipeline = Pipeline([
+            ("impute", SimpleImputer(strategy="most_frequent")),
+            ("ohe", OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore"))
+        ])
 
-    # ColumnTransformer orchestrator
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("cont", cont_pipeline, cont_cols),
-            ("dist", binarize_pipeline, dist_cols),
-            ("spline", spline_pipeline, temporal_cols),
-            ("cat", cat_pipeline, cat_cols)
-        ]
-    )
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ("cont", cont_pipeline, cont_cols),
+                ("dist", binarize_pipeline, dist_cols),
+                ("spline", spline_pipeline, temporal_cols),
+                ("cat", cat_pipeline, cat_cols)
+            ])
 
-    # 5. Full imblearn Pipeline with SMOTE, PCA, and SelectKBest
-    full_pipeline = ImbPipeline([
-        ("preprocessor", preprocessor),
-        
-        # Unsupervised projection of collinear features
-        ("pca", PCA(n_components=6, random_state=42)),
-        
-        # Synthetic minority oversampling (active ONLY during fit)
-        ("smote", SMOTE(k_neighbors=3, random_state=42)),
-        
-        # Supervised ANOVA-F hypothesis testing
-        ("select_k_best", SelectKBest(score_func=f_classif, k=4)),
-        
-        # Final Estimator
-        ("classifier", LogisticRegression(solver="liblinear", random_state=42))
-    ])
+        # 5. Full imblearn Pipeline with SMOTE, PCA, and SelectKBest
+        full_pipeline = ImbPipeline([
+            ("preprocessor", preprocessor),
+            
+            # Unsupervised projection of collinear features
+            ("pca", PCA(n_components=6, random_state=42)),
+            
+            # Synthetic minority oversampling (active ONLY during fit)
+            ("smote", SMOTE(k_neighbors=3, random_state=42)),
+            
+            # Supervised ANOVA-F hypothesis testing
+            ("select_k_best", SelectKBest(score_func=f_classif, k=4)),
+            
+            # Final Estimator
+            ("classifier",  LogisticRegression(solver="liblinear", random_state=42))
+        ])
+
+    elif CLASSIFIER == "xgb":
+
+        """
+        changes when switching from linear model to ensemble of decision trees
+        -Dropping PCA and SelectKBest - unlike linear mdels,, decision trees simply pick the best split among correlated features and ignore the redundant ones,
+         Trees perform intrinsic feature selection
+        -Replacing OneHotEncoder with TargetEncoder
+        -Replacing SMOTE with scale_pos_weight
+
+        cat_pipeline = Pipeline([
+            ("imputer", SimpleImputer(strategy="constant", fill_value="missing")),
+            ("target_enc", TargetEncoder(cv=5, smooth="auto", random_state=42))
+            ])
+
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ("cont", cont_pipeline, cont_cols),
+                ("dist", binarize_pipeline, dist_cols),
+                ("spline", spline_pipeline, temporal_cols),
+                ("cat", cat_pipeline, cat_cols)
+            ],
+            remainder="drop"
+            )
+
+        full_pipeline = Pipeline([
+            ("preprocessor", preprocessor),
+            ("xgb", xgb.XGBClassifier(
+                n_estimators=150,
+                learning_rate=0.05,
+                max_depth=5,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                scale_pos_weight=scale_pos_weight,
+                objective="binary:logistic",
+                eval_metric="aucpr",  # Area under Precision-Recall curve
+                random_state=42,
+                tree_method="hist"    # Fast histogram-based tree binning
+            ))
+            ])
     
     return full_pipeline
-
 
 if __name__ == "__main__":
     df = load_data()
@@ -192,15 +242,54 @@ if __name__ == "__main__":
     print(df.head())
 
     import sys
-    sys.exit()
+    #sys.exit()
 
     y = df["isFraud"].to_numpy()
-    X = df.drop(columns=["isFraud","TransactionID","DeviceInfo"])
+    X = df.drop(columns=["isFraud","TransactionID"])
+
+    #shuffle prevents data leakage from future when using dates
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.20, shuffle=False
+    )
 
     print(f"dataset shape {X.shape} mean y {y.mean():.4f}")
 
-    pipeline = build_pipeline()
-    pipeline.fit(X,y)
+    if CLASSIFIER == "LR":
+        scale_pos_weight=0
+    elif CLASSIFIER == "xgb":
+        # Dynamic calculation of scale_pos_weight to counteract 96.5:3.5 class imbalance
+        n_neg = (y_train == 0).sum()
+        n_pos = (y_train == 1).sum()
+        scale_pos_weight = float(n_neg / n_pos)
+        print(f"Calculated scale_pos_weight: {scale_pos_weight:.2f}")
 
-    preds = pipeline.predict(X)
-    probs = pipeline.predict_proba(X)[:,1]
+    pipeline = build_pipeline(scale_pos_weight)
+    pipeline.fit(X_train,y_train)
+
+    preds = pipeline.predict(X_test)
+    probs = pipeline.predict_proba(X_test)[:,1] #select all rows and only the second column
+
+
+    #sort makes asc from low to high, ::-1 inverts from high to low, :5 gets first 5 rows
+    top_5_highest = np.sort(probs)[::-1][:5]
+    print(f"Top 5 highest predicted probabilities: {np.round(top_5_highest, 4)}")
+
+    #Instead of returning hard 0 or 1 class predictions, it returns a 2D NumPy array with two columns—one for each class—where each row adds up to 1.0:
+    print(pipeline.predict_proba(X_test))
+
+    if CLASSIFIER == "xgb":
+        # In fraud detection with skewed weights, standard 0.5 threshold can be adjusted
+        y_pred = (probs >= 0.5).astype(int)
+
+        roc_auc = roc_auc_score(y_test, probs)
+        pr_auc = average_precision_score(y_test, probs)
+        brier = brier_score_loss(y_test, probs)
+
+        print("\n" + "=" * 60)
+        print("                EVALUATION METRICS (TEST SET)              ")
+        print("=" * 60)
+        print(f"ROC-AUC Score          : {roc_auc:.4f}")
+        print(f"PR-AUC (Avg Precision) : {pr_auc:.4f}")
+        print(f"Brier Score Loss       : {brier:.4f} (lower is better)")
+        print("\nClassification Report (Default 0.5 threshold):")
+        print(classification_report(y_test, y_pred, digits=4))
