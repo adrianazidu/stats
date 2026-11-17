@@ -11,26 +11,7 @@ from sklearn.preprocessing import Binarizer, SplineTransformer
 # ==============================================================================
 # 1. INGESTION & DATA PREPARATION
 # ==============================================================================
-def load_data():
-    """Generates or loads relational IEEE-CIS sample."""
-    np.random.seed(42)
-    n = 6000
-    y = np.random.choice([0, 1], size=n, p=[0.965, 0.035])
-
-    df = pd.DataFrame({
-        "TransactionAmt": np.where(y == 1, np.random.exponential(180, size=n), np.random.exponential(60, size=n)),
-        "TransactionDT": np.sort(np.random.randint(86400, 86400 * 30, size=n)),
-        "ProductCD": np.random.choice(["W", "C", "R", "H", "S"], size=n),
-        "card4": np.random.choice(["visa", "mastercard", "discover"], size=n),
-        "dist1": np.where(np.random.rand(n) > 0.45, np.random.exponential(25.0, size=n), np.nan),
-        "C1": np.where(y == 1, np.random.poisson(4.0, size=n), np.random.poisson(1.1, size=n)),
-        "V1": np.random.normal(0, 1, size=n),
-        "DeviceType": np.random.choice(["desktop", "mobile", "missing"], size=n),
-        "isFraud": y
-    })
-    return df
-
-
+from get_data import load_data
 df = load_data()
 
 # ==============================================================================
